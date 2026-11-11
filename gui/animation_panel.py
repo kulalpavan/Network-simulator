@@ -4,12 +4,20 @@ import re
 import tkinter as tk
 from tkinter import ttk
 
+from gui import theme
+
 
 _FRAME_PATTERN = re.compile(r"\bFrame\s+(\d+)\b", re.IGNORECASE)
 _ACK_PATTERN = re.compile(r"\bACK\s+(\d+)\b", re.IGNORECASE)
 _ATTEMPT_PATTERN = re.compile(r"\bAttempt\s+(\d+)\b", re.IGNORECASE)
 _WINDOW_PATTERN = re.compile(r"\[(\d+),\s*(\d+)\]")
 _SLIDE_PATTERN = re.compile(r"from\s+(\d+)\s+to\s+(\d+)", re.IGNORECASE)
+
+RULE_SUMMARY = {
+    "One-Bit Sliding Window": "Window 1 · one frame in flight · timeout resends it",
+    "Go-Back-N": "Window N · cumulative ACKs · timeout resends the window",
+    "Selective Repeat": "Window N · individual ACKs · resend only missing frames",
+}
 
 
 def normalize_events(events, protocol, parameters):
@@ -193,48 +201,88 @@ def normalize_events(events, protocol, parameters):
 class AnimationPanel(ttk.Frame):
     """Animate actual protocol events on a scrollable time-ordered diagram."""
 
-    COLORS = {
-        "navy": "#14213D",
-        "blue": "#2563EB",
-        "green": "#16A34A",
-        "red": "#DC2626",
-        "orange": "#EA8A12",
-        "grey": "#94A3B8",
-        "light": "#F8FAFC",
-        "grid": "#E2E8F0",
-    }
+    COLORS = theme.COLORS
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.configure(style="TFrame")
+        self.configure(style="App.TFrame")
 
         self.header_canvas = tk.Canvas(
             self,
-            height=90,
-            bg="white",
-            highlightthickness=1,
-            highlightbackground="#D8E0EA",
+            height=theme.px(104),
+            background=self.COLORS["surface"],
+            highlightthickness=0,
+            bd=0,
         )
-        self.header_canvas.pack(fill="x", padx=2, pady=(2, 0))
+        self.header_canvas.pack(fill="x")
 
-        timeline_frame = ttk.Frame(self)
-        timeline_frame.pack(fill="both", expand=True, padx=2, pady=(0, 2))
+        self.explanation_frame = tk.Frame(
+            self,
+            background=self.COLORS["surface_alt"],
+            highlightbackground=self.COLORS["border"],
+            highlightthickness=1,
+        )
+        self.explanation_frame.pack(fill="x", pady=(6, 0))
+        self.explanation_frame.bind("<Configure>", self._on_explanation_resize)
+
+        accent_bar = tk.Frame(
+            self.explanation_frame,
+            background=self.COLORS["primary"],
+            width=4,
+        )
+        accent_bar.pack(side="left", fill="y")
+        explanation_inner = tk.Frame(
+            self.explanation_frame,
+            background=self.COLORS["surface_alt"],
+        )
+        explanation_inner.pack(side="left", fill="both", expand=True, padx=12, pady=8)
+        tk.Label(
+            explanation_inner,
+            text="WHY THIS STEP",
+            background=self.COLORS["surface_alt"],
+            foreground=self.COLORS["primary"],
+            font=theme.font(7, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        self.explanation_label = tk.Label(
+            explanation_inner,
+            text=(
+                "Run a simulation to see the protocol's decision explained "
+                "at every step."
+            ),
+            background=self.COLORS["surface_alt"],
+            foreground=self.COLORS["body"],
+            font=theme.font(9),
+            anchor="w",
+            justify="left",
+            wraplength=700,
+        )
+        self.explanation_label.pack(fill="x", pady=(3, 0))
+
+        self._build_legend()
+
+        timeline_frame = tk.Frame(self, background=self.COLORS["surface"])
+        timeline_frame.pack(fill="both", expand=True, pady=(6, 0))
         self.canvas = tk.Canvas(
             timeline_frame,
-            height=35,
-            bg="white",
-            highlightthickness=1,
-            highlightbackground="#D8E0EA",
+            background=self.COLORS["surface"],
+            highlightthickness=0,
+            bd=0,
+            height=30,
         )
         self.scrollbar = ttk.Scrollbar(
-            timeline_frame, orient="vertical", command=self.canvas.yview
+            timeline_frame,
+            orient="vertical",
+            command=self.canvas.yview,
+            style="Vertical.TScrollbar",
         )
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.canvas.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=2)
-        self.scrollbar.pack(side="right", fill="y", pady=2)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
 
         self.records = []
         self.parameters = {}
+        self.protocol = None
         self.current_index = 0
         self.current_record = None
         self.on_event = None
@@ -257,10 +305,67 @@ class AnimationPanel(ttk.Frame):
         self.canvas.bind("<Configure>", self._on_configure)
         self._draw_base()
 
+    def _build_legend(self):
+        legend = tk.Frame(self, background=self.COLORS["surface"])
+        legend.pack(fill="x", pady=(8, 0))
+        tk.Label(
+            legend,
+            text="LEGEND",
+            background=self.COLORS["surface"],
+            foreground=self.COLORS["faint"],
+            font=theme.font(7, "bold"),
+        ).pack(side="left", padx=(2, 12))
+        items = [
+            ("Data frame", self.COLORS["primary"], False, tk.LAST),
+            ("ACK", self.COLORS["success"], True, tk.LAST),
+            ("Lost", self.COLORS["danger"], False, None),
+            ("Retransmission", self.COLORS["warning"], False, tk.LAST),
+            ("Discarded", self.COLORS["faint"], True, tk.LAST),
+        ]
+        for label, color, dashed, arrow in items:
+            item = tk.Frame(legend, background=self.COLORS["surface"])
+            item.pack(side="left", padx=(0, 16))
+            canvas = tk.Canvas(
+                item,
+                width=32,
+                height=12,
+                background=self.COLORS["surface"],
+                highlightthickness=0,
+            )
+            canvas.pack(side="left", padx=(0, 5))
+            if label == "Lost":
+                canvas.create_line(
+                    2, 6, 30, 6, fill=color, width=2, dash=(3, 2)
+                )
+                canvas.create_text(
+                    16, 6, text="✕", fill=color, font=theme.font(8, "bold")
+                )
+            else:
+                canvas.create_line(
+                    2,
+                    6,
+                    30,
+                    6,
+                    fill=color,
+                    width=2,
+                    dash=(3, 2) if dashed else (),
+                    arrow=arrow,
+                )
+            tk.Label(
+                item,
+                text=label,
+                background=self.COLORS["surface"],
+                foreground=self.COLORS["muted"],
+                font=theme.font(8),
+            ).pack(side="left")
+
+    def _on_explanation_resize(self, event):
+        self.explanation_label.configure(wraplength=max(event.width - 150, 240))
+
     def _layout(self):
         width = max(self.canvas.winfo_width(), 720)
-        sender_x = max(120, width * 0.19)
-        receiver_x = min(width - 120, width * 0.81)
+        sender_x = max(130, width * 0.17)
+        receiver_x = min(width - 130, width * 0.83)
         return width, sender_x, receiver_x
 
     def _draw_base(self):
@@ -269,47 +374,108 @@ class AnimationPanel(ttk.Frame):
         width, sender_x, receiver_x = self._layout()
         self.sender_x = sender_x
         self.receiver_x = receiver_x
-        self.row_start = 22
-        self.row_gap = 42
+        self.row_start = theme.px(26)
+        self.row_gap = theme.px(50)
 
-        self.header_canvas.create_text(
-            sender_x, 16, text="SENDER", fill=self.COLORS["navy"],
-            font=("Segoe UI", 11, "bold")
+        mid = (sender_x + receiver_x) / 2
+        protocol = self.protocol
+        accent = theme.protocol_accent(protocol) if protocol else self.COLORS["primary"]
+        soft = theme.protocol_soft(protocol) if protocol else self.COLORS["primary_soft"]
+        display = (
+            theme.PROTOCOL_COLORS[protocol]["label"].upper()
+            if protocol else "READY TO SIMULATE"
         )
-        self.header_canvas.create_text(
-            receiver_x, 16, text="RECEIVER", fill=self.COLORS["navy"],
-            font=("Segoe UI", 11, "bold")
+        rule = RULE_SUMMARY.get(
+            protocol,
+            "Choose a protocol and run a simulation to watch it work.",
         )
+
+        self.protocol_title_id = self.header_canvas.create_text(
+            mid,
+            theme.px(18),
+            text=display,
+            fill=accent,
+            font=theme.font(10, "bold"),
+        )
+        self.rule_summary_id = self.header_canvas.create_text(
+            mid,
+            theme.px(35),
+            text=rule,
+            fill=self.COLORS["muted"],
+            font=theme.font(8),
+        )
+
         self.header_canvas.create_rectangle(
-            sender_x - 48, 26, sender_x + 48, 54,
-            fill="#EFF6FF", outline="#93C5FD", width=1
+            sender_x - theme.px(82), theme.px(50),
+            sender_x + theme.px(82), theme.px(96),
+            fill=soft, outline=accent, width=1,
         )
+        self.header_canvas.create_text(
+            sender_x, theme.px(65),
+            text="SENDER",
+            fill=accent,
+            font=theme.font(9, "bold"),
+        )
+        self.sender_window_id = self.header_canvas.create_text(
+            sender_x, theme.px(82),
+            text="window —",
+            fill=self.COLORS["body"],
+            font=theme.font(8),
+        )
+
         self.header_canvas.create_rectangle(
-            receiver_x - 48, 26, receiver_x + 48, 54,
-            fill="#F0FDF4", outline="#86EFAC", width=1
+            receiver_x - theme.px(82), theme.px(50),
+            receiver_x + theme.px(82), theme.px(96),
+            fill=self.COLORS["success_soft"],
+            outline=self.COLORS["success"],
+            width=1,
         )
         self.header_canvas.create_text(
-            sender_x, 40, text="Sender", fill=self.COLORS["navy"],
-            font=("Segoe UI", 9, "bold")
+            receiver_x, theme.px(65),
+            text="RECEIVER",
+            fill=self.COLORS["success"],
+            font=theme.font(9, "bold"),
         )
-        self.header_canvas.create_text(
-            receiver_x, 40, text="Receiver", fill=self.COLORS["navy"],
-            font=("Segoe UI", 9, "bold")
+        self.receiver_window_id = self.header_canvas.create_text(
+            receiver_x, theme.px(82),
+            text="expects —",
+            fill=self.COLORS["body"],
+            font=theme.font(8),
         )
+
         self.current_status_id = self.header_canvas.create_text(
-            width / 2, 66, text="Waiting for simulation",
-            fill="#475569", font=("Segoe UI", 9, "bold")
+            mid,
+            theme.px(68),
+            text="Waiting for a run",
+            fill=self.COLORS["muted"],
+            font=theme.font(9, "bold"),
         )
-        self.window_status_id = self.header_canvas.create_text(
-            width / 2, 82, text="Sender window: —    Receiver window: —",
-            fill="#475569", font=("Segoe UI", 8)
+        self.header_canvas.create_text(
+            mid,
+            theme.px(87),
+            text="DATA →   ·   ← ACK",
+            fill=self.COLORS["faint"],
+            font=theme.font(7, "bold"),
         )
-        self.header_canvas.create_line(
-            sender_x, 54, sender_x, 90, fill="#CBD5E1", width=1
-        )
-        self.header_canvas.create_line(
-            receiver_x, 54, receiver_x, 90, fill="#CBD5E1", width=1
-        )
+        if not self.records:
+            hint_y = max(self.canvas.winfo_height() / 2, 90)
+            self.canvas.create_text(
+                mid,
+                hint_y - 8,
+                text="No events yet",
+                fill=self.COLORS["muted"],
+                font=theme.font(11, "bold"),
+            )
+            self.canvas.create_text(
+                mid,
+                hint_y + 14,
+                text=(
+                    "Run a simulation to watch frames travel to the "
+                    "receiver and ACKs travel back."
+                ),
+                fill=self.COLORS["faint"],
+                font=theme.font(8),
+            )
         self._update_scroll_region()
 
     def _on_configure(self, _event):
@@ -327,13 +493,12 @@ class AnimationPanel(ttk.Frame):
                 text=self._status_text(self.current_record),
                 fill=self._status_color(self.current_record),
             )
+            self._set_explanation(self._explain_record(self.current_record))
         for index, record in enumerate(self.records[:current_index]):
             self._draw_event_row(record, index)
             self._draw_static_event(record, index)
         self._update_window_labels()
         self._update_scroll_region()
-        if self.records and not self.playback_active:
-            self._render_legend()
         self.resize_pending = False
 
     def _row_y(self, index):
@@ -341,8 +506,13 @@ class AnimationPanel(ttk.Frame):
 
     def _update_scroll_region(self):
         width, _, _ = self._layout()
-        row_count = max(self.current_index, len(self.records) if not self.playback_active else 0)
-        content_bottom = self.row_start + row_count * self.row_gap + 70
+        row_count = max(
+            self.current_index,
+            len(self.records) if not self.playback_active else 0,
+        )
+        content_bottom = (
+            self.row_start + row_count * self.row_gap + theme.px(40)
+        )
         self.canvas.configure(
             scrollregion=(
                 0, 0, width,
@@ -357,66 +527,274 @@ class AnimationPanel(ttk.Frame):
             return
         content_height = float(region[3])
         viewport_height = max(self.canvas.winfo_height(), 1)
-        target_top = max(
-            0, self._row_y(index) - viewport_height / 2
-        )
+        target_top = max(0, self._row_y(index) - viewport_height / 2)
         self.canvas.yview_moveto(
             min(target_top / max(content_height, 1), 1)
         )
 
     def _update_window_labels(self):
-        width, _, _ = self._layout()
         frame_count = int(self.parameters.get("frames", 0))
         window_size = int(self.parameters.get("window", 1))
         sender_end = min(self.sender_base + window_size - 1, frame_count - 1)
-        receiver_end = min(self.receiver_base + window_size - 1, frame_count - 1)
-        sender_window = (
-            f"[{self.sender_base}, {sender_end}]"
-            if frame_count and self.sender_base < frame_count else "[]"
-        )
-        receiver_window = (
-            f"[{self.receiver_base}, {receiver_end}]"
-            if frame_count and self.receiver_base < frame_count else "[]"
-        )
-        self.header_canvas.coords(self.window_status_id, width / 2, 82)
+        if frame_count and self.sender_base < frame_count:
+            sender_window = f"window [{self.sender_base}..{sender_end}]"
+        elif frame_count:
+            sender_window = "window complete"
+        else:
+            sender_window = "window —"
+
+        protocol = self.protocol or "One-Bit Sliding Window"
+        if protocol == "One-Bit Sliding Window":
+            receiver_window = f"expects seq {self.receiver_base % 2}"
+        else:
+            receiver_window = f"expects frame {self.receiver_base}"
+
         self.header_canvas.itemconfigure(
-            self.window_status_id,
-            text=f"Sender window: {sender_window}    "
-            f"Receiver window: {receiver_window}",
+            self.sender_window_id,
+            text=sender_window,
         )
-
-    def _prepare_record(self, record):
-        if record["kind"] == "window" and record["window"]:
-            self.sender_base = record["window"][0]
-        elif record["kind"] == "window_slide" and record["slide"]:
-            self.sender_base = record["slide"][1]
-        elif (
-            record["kind"] == "data_tx"
-            and record["attempt"] == 1
-            and record["protocol"] == "One-Bit Sliding Window"
-        ):
-            self.sender_base = record["frame"] or 0
-        elif (
-            record["kind"] == "ack_received"
-            and record["protocol"] == "One-Bit Sliding Window"
-        ):
-            self.sender_base += 1
-
-        if record["kind"] == "received" and record["frame"] is not None:
-            self.received_frames.add(record["frame"])
-            while self.receiver_base in self.received_frames:
-                self.receiver_base += 1
-        elif record["kind"] == "buffered" and record["frame"] is not None:
-            self.received_frames.add(record["frame"])
-            while self.receiver_base in self.received_frames:
-                self.receiver_base += 1
-
-        self._update_window_labels()
         self.header_canvas.itemconfigure(
-            self.current_status_id,
-            text=self._status_text(record),
-            fill=self._status_color(record),
+            self.receiver_window_id,
+            text=receiver_window,
         )
+
+    def _set_explanation(self, text):
+        self.explanation_label.configure(text=text)
+
+    def _explain_record(self, record):
+        if record is None:
+            return ""
+        protocol = record.get("protocol") or self.protocol or ""
+        kind = record["kind"]
+        frame = record["frame"]
+        ack = record["ack"]
+        attempt = record["attempt"]
+        window = int(self.parameters.get("window", 1))
+
+        if kind == "start":
+            if protocol == "One-Bit Sliding Window":
+                return (
+                    "The sender starts with a window of one frame. It will "
+                    "send frame 0, wait for its ACK, then send frame 1."
+                )
+            return (
+                f"The sender starts with a window of {window} frames. "
+                "Up to that many frames can be unacknowledged at once."
+            )
+        if kind == "complete":
+            return (
+                "All frames are delivered. Every lost frame or ACK was "
+                "recovered using this protocol's retransmission rule."
+            )
+        if kind == "data_tx":
+            if protocol == "One-Bit Sliding Window":
+                if attempt > 1:
+                    return (
+                        "Stop-and-Wait resends the same frame after a "
+                        "timeout. The receiver may see a duplicate and will "
+                        "ACK it again."
+                    )
+                return (
+                    f"Stop-and-Wait sends frame {frame} and then stops. "
+                    "Because the window is size 1, the next frame cannot "
+                    "leave until this frame's ACK returns."
+                )
+            if protocol == "Go-Back-N":
+                if attempt > 1:
+                    return (
+                        f"Go-Back-N retransmits frame {frame} because the "
+                        "timeout rolled the sender back. Every frame from "
+                        "the base is sent again, even frames that arrived."
+                    )
+                return (
+                    f"Go-Back-N sends frame {frame} as part of its window. "
+                    "The receiver accepts it only if it is the next "
+                    "expected frame; later frames are discarded."
+                )
+            if attempt > 1:
+                return (
+                    f"Selective Repeat resends only frame {frame}. Frames "
+                    "that were already acknowledged stay outside the "
+                    "recovery, so no bandwidth is wasted."
+                )
+            return (
+                f"Selective Repeat sends frame {frame}. The receiver can "
+                "buffer it and ACK it individually even if earlier frames "
+                "are still missing."
+            )
+        if kind == "data_lost":
+            if protocol == "One-Bit Sliding Window":
+                return (
+                    "The network dropped this frame. The sender will wait "
+                    "for its timeout, then send the exact same frame again."
+                )
+            if protocol == "Go-Back-N":
+                return (
+                    "The network dropped this frame. Go-Back-N cannot skip "
+                    "it: after the timeout, this frame and every frame after "
+                    "it in the window are resent."
+                )
+            return (
+                "The network dropped this frame. The receiver will buffer "
+                "later frames, and Selective Repeat will resend only this "
+                "frame after a timeout."
+            )
+        if kind == "ack_generated":
+            if protocol == "One-Bit Sliding Window":
+                return (
+                    f"The receiver returns ACK {ack}. Stop-and-Wait uses a "
+                    "single alternating bit, so this ACK confirms that the "
+                    "sender may move to the next frame."
+                )
+            if protocol == "Go-Back-N":
+                return (
+                    f"The receiver returns cumulative ACK {ack}: every "
+                    f"frame up to frame {ack} arrived in order. A single "
+                    "gap stops later frames from being acknowledged."
+                )
+            return (
+                f"The receiver returns individual ACK {ack}. It confirms "
+                f"frame {ack} alone, so missing earlier frames do not block "
+                "this acknowledgement."
+            )
+        if kind == "ack_received":
+            if protocol == "One-Bit Sliding Window":
+                return (
+                    "The ACK reaches the sender. The sender flips its 0/1 "
+                    "sequence number and may now send the next frame. Only "
+                    "one frame was ever in flight."
+                )
+            if protocol == "Go-Back-N":
+                return (
+                    f"The sender receives ACK {ack} and slides its window "
+                    "past every frame it covers. Frames behind the base are "
+                    "now considered delivered."
+                )
+            return (
+                f"The sender marks frame {ack} as acknowledged. Its window "
+                "slides forward once the lowest outstanding frames are all "
+                "complete."
+            )
+        if kind == "ack_lost":
+            if protocol == "One-Bit Sliding Window":
+                return (
+                    "This ACK was dropped. The data arrived, but the sender "
+                    "cannot know, so it times out and resends the frame. "
+                    "The receiver treats the copy as a duplicate."
+                )
+            if protocol == "Go-Back-N":
+                return (
+                    "This ACK was dropped. Go-Back-N depends on cumulative "
+                    "ACKs, so the sender's window cannot advance and the "
+                    "whole outstanding window will be sent again."
+                )
+            return (
+                "This ACK was dropped. The frame is safely at the receiver, "
+                "but after the timeout only this frame will be resent; "
+                "later frames keep their acknowledgements."
+            )
+        if kind == "timeout":
+            if protocol == "One-Bit Sliding Window":
+                return (
+                    "No ACK arrived within the timeout. The sender assumes "
+                    "the frame was lost and retransmits the same frame."
+                )
+            if protocol == "Go-Back-N":
+                return (
+                    "The timeout fires before a new cumulative ACK arrives. "
+                    "The sender goes back to its base and resends the entire "
+                    "outstanding window."
+                )
+            return (
+                "The timeout fires for missing ACKs. The sender retransmits "
+                "only the unacknowledged frames and leaves acknowledged "
+                "frames alone."
+            )
+        if kind == "retransmit":
+            if protocol == "Go-Back-N":
+                return (
+                    "Recovery begins. Go-Back-N will resend every frame in "
+                    "the window starting from the sender's base."
+                )
+            if protocol == "Selective Repeat":
+                return (
+                    "Recovery begins. Selective Repeat will resend only the "
+                    "frames whose ACKs are still missing."
+                )
+            return "The sender retransmits the frame that timed out."
+        if kind == "received":
+            if protocol == "Go-Back-N":
+                return (
+                    "This is the next expected frame, so the receiver "
+                    "accepts it and advances its expected frame number."
+                )
+            if protocol == "Selective Repeat":
+                return (
+                    "The frame is buffered at the receiver. It can be "
+                    "acknowledged immediately even if earlier frames are "
+                    "still missing."
+                )
+            return (
+                "The frame matches the expected sequence number, so the "
+                "receiver delivers it to the upper layer and prepares an "
+                "ACK."
+            )
+        if kind == "delivered":
+            return "The frame is delivered to the application layer."
+        if kind == "buffered":
+            return (
+                "Selective Repeat keeps this out-of-order frame in its "
+                "buffer until the missing frame arrives."
+            )
+        if kind == "duplicate":
+            if protocol == "One-Bit Sliding Window":
+                return (
+                    "The receiver already delivered this frame. It discards "
+                    "the copy but sends the ACK again so the sender can "
+                    "move on."
+                )
+            if protocol == "Go-Back-N":
+                return (
+                    "The receiver has already moved past this frame, so the "
+                    "duplicate is discarded. The cumulative ACK still "
+                    "reports the highest in-order frame."
+                )
+            return (
+                "The receiver already has this frame, so the duplicate is "
+                "discarded. The original ACK may be repeated."
+            )
+        if kind == "discard":
+            if protocol == "Go-Back-N":
+                return (
+                    "Out-of-order frames are discarded in Go-Back-N. The "
+                    "receiver only accepts the next expected frame, so this "
+                    "data will be resent later."
+                )
+            return (
+                "The frame is discarded because it is a duplicate or falls "
+                "outside the receiver's window."
+            )
+        if kind == "window":
+            if record["window"]:
+                start, end = record["window"]
+                return (
+                    f"The sender's window covers frames {start} to {end}. "
+                    "Only these frames may be sent before ACKs move the "
+                    "window forward."
+                )
+            return "The sender's window limits how many frames can be in flight."
+        if kind == "window_slide":
+            if record["slide"]:
+                old, new = record["slide"]
+                return (
+                    f"ACKs arrived, so the sender's window slides from "
+                    f"frame {old} to frame {new}. Acknowledged frames leave "
+                    "the window."
+                )
+            return "The sender's window slides forward after acknowledgements."
+        if kind == "ready":
+            return "The sender is ready to move on to the next frame."
+        return record["event"]
 
     @staticmethod
     def _status_text(record):
@@ -427,7 +805,7 @@ class AnimationPanel(ttk.Frame):
             message = "Simulation started"
         elif kind == "data_tx":
             action = "Retransmitting" if record["attempt"] > 1 else "Sending"
-            message = f"{action} Frame {frame}"
+            message = f"{action} frame {frame}"
         elif kind == "data_lost":
             message = f"Frame {frame} lost"
         elif kind == "ack_generated":
@@ -445,59 +823,84 @@ class AnimationPanel(ttk.Frame):
         elif kind == "timeout":
             message = "Timeout"
         elif kind == "retransmit":
-            message = "Retransmission begins"
+            message = "Recovery begins"
         elif kind == "window" and record["window"]:
-            message = f"Sender window {record['window']}"
+            message = f"Window {record['window']}"
         elif kind == "window_slide" and record["slide"]:
-            message = f"Sender window slides to {record['slide'][1]}"
+            message = f"Window slides to {record['slide'][1]}"
         elif kind == "complete":
             message = "Simulation complete"
         else:
             message = record["event"]
-        return f"Step {record['step']}: {message}"
+        return f"Step {record['step']} · {message}"
 
     @staticmethod
     def _status_color(record):
         kind = record["kind"]
         if kind in ("data_lost", "ack_lost", "timeout"):
-            return "#DC2626"
+            return theme.COLORS["danger"]
         if kind == "retransmit" or (
             kind == "data_tx" and record["attempt"] > 1
         ):
-            return "#EA8A12"
+            return theme.COLORS["warning"]
         if kind in ("duplicate", "discard"):
-            return "#64748B"
-        if kind in ("received", "delivered", "buffered", "ack_received"):
-            return "#16A34A"
-        if kind in ("data_tx", "ack_generated"):
-            return "#2563EB" if kind == "data_tx" else "#16A34A"
-        return "#475569"
+            return theme.COLORS["muted"]
+        if kind in ("received", "delivered", "buffered", "ack_received", "complete"):
+            return theme.COLORS["success"]
+        if kind == "data_tx":
+            return theme.COLORS["primary"]
+        if kind == "ack_generated":
+            return theme.COLORS["success"]
+        return theme.COLORS["body"]
 
     def _draw_event_row(self, record, index):
         y = self._row_y(index)
         width, _, _ = self._layout()
+        is_current = index == self.current_index - 1
         self.canvas.create_rectangle(
-            0, y - 16, width, y + 16,
-            fill="#EFF6FF" if index == self.current_index - 1 else "white",
+            0, y - 23, width, y + 23,
+            fill=self.COLORS["surface_tint"] if is_current else "white",
             outline="",
-            tags=("event_row",),
+        )
+        if is_current:
+            self.canvas.create_rectangle(
+                0, y - 23, 3, y + 23,
+                fill=self.COLORS["primary"],
+                outline="",
+            )
+        self.canvas.create_line(
+            0, y + 24, width, y + 24,
+            fill=self.COLORS["border"],
+            width=1,
         )
         self.canvas.create_line(
-            0, y + 17, width, y + 17,
-            fill=self.COLORS["grid"], width=1
-        )
-        self.canvas.create_line(
-            self.sender_x, 0, self.sender_x, y,
-            fill="#CBD5E1", width=1
-        )
-        self.canvas.create_line(
-            self.receiver_x, 0, self.receiver_x, y,
-            fill="#CBD5E1", width=1
+            82, y - 23, 82, y + 23,
+            fill=self.COLORS["border"],
+            width=1,
         )
         self.canvas.create_text(
-            10, y, anchor="w",
-            text=f"{record['step']:>3}  {record['time_ms']:>7.1f} ms",
-            fill="#64748B", font=("Consolas", 7)
+            14, y - 7, anchor="w",
+            text=f"{record['step']:02d}",
+            fill=self.COLORS["ink"],
+            font=theme.font(9, "bold"),
+        )
+        self.canvas.create_text(
+            14, y + 9, anchor="w",
+            text=f"{record['time_ms']:.0f} ms",
+            fill=self.COLORS["faint"],
+            font=theme.font(7),
+        )
+        self.canvas.create_line(
+            self.sender_x, y, self.sender_x, y + 24,
+            fill=self.COLORS["border"],
+            width=1,
+            dash=(2, 3),
+        )
+        self.canvas.create_line(
+            self.receiver_x, y, self.receiver_x, y + 24,
+            fill=self.COLORS["border"],
+            width=1,
+            dash=(2, 3),
         )
 
     def _draw_static_event(self, record, index):
@@ -505,11 +908,13 @@ class AnimationPanel(ttk.Frame):
         kind = record["kind"]
         frame = record["frame"]
         ack = record["ack"]
+        mid = (self.sender_x + self.receiver_x) / 2
+        accent = theme.protocol_accent(record["protocol"]) if record["protocol"] else self.COLORS["primary"]
 
         if kind == "data_tx":
             color = (
-                self.COLORS["orange"] if record["attempt"] > 1
-                else self.COLORS["blue"]
+                self.COLORS["warning"] if record["attempt"] > 1
+                else self.COLORS["primary"]
             )
             target_x = (
                 self.sender_x + (self.receiver_x - self.sender_x) * 0.53
@@ -517,8 +922,8 @@ class AnimationPanel(ttk.Frame):
                 else self.receiver_x
             )
             self._draw_arrow(
-                self.sender_x, y - 5, target_x, y - 5, color,
-                f"F{frame}", dashed=False,
+                self.sender_x, y - 9, target_x, y - 9, color,
+                f"F{frame}" if frame is not None else "data",
                 lost=not record["transmission_succeeded"],
             )
         elif kind == "ack_generated":
@@ -528,118 +933,145 @@ class AnimationPanel(ttk.Frame):
                 else self.sender_x
             )
             self._draw_arrow(
-                self.receiver_x, y + 5, target_x, y + 5,
-                self.COLORS["green"], f"ACK {ack}", dashed=True,
+                self.receiver_x, y + 10, target_x, y + 10,
+                self.COLORS["success"],
+                f"ACK {ack}" if ack is not None else "ACK",
+                dashed=True,
                 lost=not record["transmission_succeeded"],
             )
-        elif kind in ("data_lost", "ack_lost"):
-            text = f"✕  {'F' + str(frame) if frame is not None else 'ACK ' + str(ack)} LOST"
-            self.canvas.create_text(
-                (self.sender_x + self.receiver_x) / 2, y,
-                text=text, fill=self.COLORS["red"],
-                font=("Segoe UI", 8, "bold")
+        elif kind == "data_lost":
+            self._draw_chip(
+                mid, y,
+                f"✕  Frame {frame} lost in transit",
+                self.COLORS["danger"],
+                self.COLORS["danger_soft"],
+            )
+        elif kind == "ack_lost":
+            self._draw_chip(
+                mid, y,
+                f"✕  ACK {ack} lost on the way back",
+                self.COLORS["danger"],
+                self.COLORS["danger_soft"],
             )
         elif kind in ("received", "delivered", "buffered"):
-            label = f"✓ F{frame}" if kind != "buffered" else f"Buffered F{frame}"
-            self.canvas.create_text(
-                self.receiver_x, y, text=label, fill=self.COLORS["green"],
-                font=("Segoe UI", 8, "bold")
+            if kind == "buffered":
+                label = f"Frame {frame} buffered"
+            elif kind == "delivered":
+                label = f"Frame {frame} delivered"
+            else:
+                label = f"Frame {frame} received"
+            self._draw_chip(
+                self.receiver_x, y,
+                f"✓  {label}",
+                self.COLORS["success"],
+                self.COLORS["success_soft"],
             )
         elif kind in ("duplicate", "discard"):
-            self._draw_arrow(
-                self.sender_x, y, self.receiver_x, y,
-                self.COLORS["grey"], f"F{frame} discarded",
-                dashed=True,
+            self._draw_chip(
+                self.receiver_x, y,
+                f"✕  Frame {frame} discarded",
+                self.COLORS["muted"],
+                self.COLORS["slate_soft"],
             )
         elif kind == "ack_received":
-            self.canvas.create_text(
-                self.sender_x, y, text=f"✓ ACK {ack}",
-                fill=self.COLORS["green"], font=("Segoe UI", 8, "bold")
+            self._draw_chip(
+                self.sender_x, y,
+                f"✓  ACK {ack} received",
+                self.COLORS["success"],
+                self.COLORS["success_soft"],
             )
         elif kind == "timeout":
-            self.canvas.create_text(
-                self.sender_x + 22, y, anchor="w",
-                text="TIMEOUT", fill=self.COLORS["red"],
-                font=("Segoe UI", 8, "bold")
+            self._draw_chip(
+                mid, y,
+                "TIMEOUT  ·  no ACK arrived",
+                self.COLORS["danger"],
+                self.COLORS["danger_soft"],
             )
         elif kind == "retransmit":
-            self.canvas.create_oval(
-                self.sender_x - 5, y - 5, self.sender_x + 5, y + 5,
-                fill=self.COLORS["orange"], outline=self.COLORS["orange"]
+            self._draw_chip(
+                mid, y,
+                "Recovery begins",
+                self.COLORS["warning"],
+                self.COLORS["warning_soft"],
             )
         elif kind == "window":
-            self.canvas.create_text(
-                self.sender_x - 56, y, anchor="e",
-                text=f"W {record['window']}", fill=self.COLORS["navy"],
-                font=("Segoe UI", 7)
+            if record["window"]:
+                start, end = record["window"]
+                label = f"Sender window [{start}..{end}]"
+            else:
+                label = "Sender window updated"
+            self._draw_chip(
+                mid, y,
+                label,
+                accent,
+                theme.protocol_soft(record["protocol"]) if record["protocol"] else self.COLORS["primary_soft"],
             )
         elif kind == "window_slide" and record["slide"]:
-            self.canvas.create_text(
-                self.sender_x - 10, y, anchor="e",
-                text=f"Window → {record['slide'][1]}",
-                fill=self.COLORS["navy"], font=("Segoe UI", 7)
+            self._draw_chip(
+                mid, y,
+                f"Window slides {record['slide'][0]} → {record['slide'][1]}",
+                accent,
+                theme.protocol_soft(record["protocol"]) if record["protocol"] else self.COLORS["primary_soft"],
             )
         elif kind in ("start", "complete"):
-            self.canvas.create_text(
-                (self.sender_x + self.receiver_x) / 2, y,
-                text=(
-                    "SIMULATION STARTED" if kind == "start"
-                    else "SIMULATION COMPLETE"
-                ),
-                fill=self.COLORS["green"] if kind == "complete" else "#64748B",
-                font=("Segoe UI", 7, "bold")
-            )
+            if kind == "start":
+                label = "SIMULATION STARTED"
+                color = self.COLORS["muted"]
+                background = self.COLORS["slate_soft"]
+            else:
+                label = "SIMULATION COMPLETE"
+                color = self.COLORS["success"]
+                background = self.COLORS["success_soft"]
+            self._draw_chip(mid, y, label, color, background)
 
-    def _draw_arrow(
-        self, start_x, y, end_x, end_y, color, label,
-        dashed=False, lost=False
-    ):
+    def _draw_chip(self, x, y, text, foreground, background):
+        item = self.canvas.create_text(
+            x, y,
+            text=text,
+            fill=foreground,
+            font=theme.font(8, "bold"),
+        )
+        bbox = self.canvas.bbox(item)
+        if bbox:
+            rectangle = self.canvas.create_rectangle(
+                bbox[0] - 10, bbox[1] - 4,
+                bbox[2] + 10, bbox[3] + 4,
+                fill=background,
+                outline="",
+            )
+            self.canvas.tag_lower(rectangle, item)
+
+    def _draw_arrow(self, start_x, y, end_x, end_y, color, label, dashed=False, lost=False):
         self.canvas.create_line(
             start_x, y, end_x, end_y,
             fill=color, width=2,
-            dash=(5, 3) if dashed else (),
+            dash=(4, 3) if dashed else (),
             arrow=tk.LAST,
         )
         label_x = (start_x + end_x) / 2
-        self.canvas.create_text(
-            label_x, y - 10, text=label, fill=color,
-            font=("Segoe UI", 8, "bold")
+        label_y = y - 12
+        item = self.canvas.create_text(
+            label_x, label_y,
+            text=label,
+            fill=color,
+            font=theme.font(8, "bold"),
         )
+        bbox = self.canvas.bbox(item)
+        if bbox:
+            background = self.canvas.create_rectangle(
+                bbox[0] - 5, bbox[1] - 1,
+                bbox[2] + 5, bbox[3] + 1,
+                fill="white",
+                outline="",
+            )
+            self.canvas.tag_lower(background, item)
         if lost:
             self.canvas.create_text(
-                end_x, end_y, text="✕", fill=self.COLORS["red"],
-                font=("Segoe UI", 13, "bold")
+                end_x, end_y,
+                text="✕",
+                fill=self.COLORS["danger"],
+                font=theme.font(11, "bold"),
             )
-
-    def _render_legend(self):
-        y = self._row_y(max(self.current_index, 1)) + 25
-        width, _, _ = self._layout()
-        items = [
-            ("Data frame", self.COLORS["blue"], False),
-            ("ACK", self.COLORS["green"], True),
-            ("Lost", self.COLORS["red"], False),
-            ("Retransmit", self.COLORS["orange"], False),
-            ("Discarded", self.COLORS["grey"], True),
-            ("Received", self.COLORS["green"], False),
-        ]
-        total_width = min(width - 24, len(items) * 118)
-        start = (width - total_width) / 2 + 8
-        for index, (label, color, dashed) in enumerate(items):
-            x = start + index * total_width / len(items)
-            self.canvas.create_line(
-                x, y + 21, x + 23, y + 21,
-                fill=color, width=2, dash=(4, 3) if dashed else (),
-                tags=("legend",)
-            )
-            self.canvas.create_text(
-                x + 28, y + 21, anchor="w", text=label,
-                fill="#334155", font=("Segoe UI", 7), tags=("legend",)
-            )
-        self.canvas.create_text(
-            width / 2, y, text="LEGEND", fill=self.COLORS["navy"],
-            font=("Segoe UI", 8, "bold"), tags=("legend",)
-        )
-        self._update_scroll_region()
 
     def play(
         self, events, protocol=None, parameters=None, on_event=None,
@@ -668,6 +1100,7 @@ class AnimationPanel(ttk.Frame):
                 "ack": 1,
                 "timeout": 1,
             }
+        self.protocol = protocol
         self.records = normalize_events(events, protocol, parameters)
         self.parameters = parameters
         self.on_event = on_event
@@ -676,6 +1109,7 @@ class AnimationPanel(ttk.Frame):
         self.playback_active = True
         self.paused = False
         self.step_mode = False
+        self._draw_base()
         self._update_window_labels()
         if self.on_state:
             self.on_state("Running")
@@ -685,6 +1119,7 @@ class AnimationPanel(ttk.Frame):
         self._cancel_scheduled()
         self.records = []
         self.parameters = {}
+        self.protocol = None
         self.current_index = 0
         self.current_record = None
         self.playback_active = False
@@ -698,6 +1133,10 @@ class AnimationPanel(ttk.Frame):
         self.on_event = None
         self.on_complete = None
         self.on_state = None
+        self._set_explanation(
+            "Run a simulation to see the protocol's decision explained at "
+            "every step."
+        )
         self._draw_base()
 
     def pause(self):
@@ -706,7 +1145,9 @@ class AnimationPanel(ttk.Frame):
         self.paused = True
         self._cancel_scheduled()
         self.header_canvas.itemconfigure(
-            self.current_status_id, text="Paused"
+            self.current_status_id,
+            text="Paused · press Resume or Step Forward",
+            fill=self.COLORS["warning"],
         )
         if self.on_state:
             self.on_state("Paused")
@@ -758,6 +1199,40 @@ class AnimationPanel(ttk.Frame):
         else:
             self._finish_current()
 
+    def _prepare_record(self, record):
+        if record["kind"] == "window" and record["window"]:
+            self.sender_base = record["window"][0]
+        elif record["kind"] == "window_slide" and record["slide"]:
+            self.sender_base = record["slide"][1]
+        elif (
+            record["kind"] == "data_tx"
+            and record["attempt"] == 1
+            and record["protocol"] == "One-Bit Sliding Window"
+        ):
+            self.sender_base = record["frame"] or 0
+        elif (
+            record["kind"] == "ack_received"
+            and record["protocol"] == "One-Bit Sliding Window"
+        ):
+            self.sender_base += 1
+
+        if record["kind"] == "received" and record["frame"] is not None:
+            self.received_frames.add(record["frame"])
+            while self.receiver_base in self.received_frames:
+                self.receiver_base += 1
+        elif record["kind"] == "buffered" and record["frame"] is not None:
+            self.received_frames.add(record["frame"])
+            while self.receiver_base in self.received_frames:
+                self.receiver_base += 1
+
+        self._update_window_labels()
+        self.header_canvas.itemconfigure(
+            self.current_status_id,
+            text=self._status_text(record),
+            fill=self._status_color(record),
+        )
+        self._set_explanation(self._explain_record(record))
+
     def _start_marker(self, record, index):
         y = self._row_y(index)
         is_data = record["kind"] == "data_tx"
@@ -769,26 +1244,31 @@ class AnimationPanel(ttk.Frame):
             end_x = start_x + (end_x - start_x) * progress
 
         color = (
-            self.COLORS["orange"]
+            self.COLORS["warning"]
             if is_data and record["attempt"] > 1
-            else self.COLORS["blue"] if is_data
-            else self.COLORS["green"]
+            else self.COLORS["primary"] if is_data
+            else self.COLORS["success"]
         )
-        label = f"F{record['frame']}" if is_data else f"ACK {record['ack']}"
-        line_y = y - 5 if is_data else y + 5
+        label = (
+            f"F{record['frame']}" if is_data
+            else f"ACK {record['ack']}"
+        )
+        line_y = y - 9 if is_data else y + 10
         line = self.canvas.create_line(
             start_x, line_y, start_x, line_y,
             fill=color, width=2,
-            dash=(5, 3) if not is_data else (),
+            dash=(4, 3) if not is_data else (),
             arrow=tk.LAST,
         )
-        marker = self.canvas.create_oval(
-            start_x - 12, line_y - 10, start_x + 12, line_y + 10,
-            fill=color, outline=color,
+        marker = self.canvas.create_rectangle(
+            start_x - 18, line_y - 10,
+            start_x + 18, line_y + 10,
+            fill=color,
+            outline=color,
         )
         text = self.canvas.create_text(
             start_x, line_y, text=label, fill="white",
-            font=("Segoe UI", 7, "bold"),
+            font=theme.font(7, "bold"),
         )
         self.marker_ids = (line, marker, text)
         self.marker_x = start_x
@@ -805,18 +1285,19 @@ class AnimationPanel(ttk.Frame):
         self.marker_x += (
             self.marker_end_x - self.marker_x
         ) / max(self.marker_steps, 1)
+        is_data = self.current_record["kind"] == "data_tx"
         line_y = (
-            self._row_y(self.current_index - 1) - 5
-            if self.current_record["kind"] == "data_tx"
-            else self._row_y(self.current_index - 1) + 5
+            self._row_y(self.current_index - 1) - 9
+            if is_data
+            else self._row_y(self.current_index - 1) + 10
         )
         self.canvas.coords(
             line, self.sender_x if self.marker_direction > 0 else self.receiver_x,
             line_y, self.marker_x, line_y
         )
         self.canvas.coords(
-            marker, self.marker_x - 12, line_y - 10,
-            self.marker_x + 12, line_y + 10
+            marker, self.marker_x - 18, line_y - 10,
+            self.marker_x + 18, line_y + 10
         )
         self.canvas.coords(text, self.marker_x, line_y)
 
@@ -846,7 +1327,8 @@ class AnimationPanel(ttk.Frame):
             self.paused = True
             self.header_canvas.itemconfigure(
                 self.current_status_id,
-                text=f"Paused after step {self.current_record['step']}"
+                text=f"Paused after step {self.current_record['step']}",
+                fill=self.COLORS["warning"],
             )
             if self.on_state:
                 self.on_state("Paused")
@@ -859,9 +1341,8 @@ class AnimationPanel(ttk.Frame):
         self.header_canvas.itemconfigure(
             self.current_status_id,
             text="Simulation complete",
-            fill=self.COLORS["green"],
+            fill=self.COLORS["success"],
         )
-        self._render_legend()
         if self.current_index:
             self._scroll_to_event(self.current_index - 1)
         if self.on_state:
@@ -913,7 +1394,7 @@ class AnimationPanel(ttk.Frame):
         width, _, _ = self._layout()
         self.canvas.create_text(
             width / 2, y, text=f"✕ {event}",
-            fill=self.COLORS["red"], font=("Segoe UI", 9, "bold")
+            fill=self.COLORS["danger"], font=theme.font(9, "bold")
         )
 
     def root_after(self, delay, callback):
