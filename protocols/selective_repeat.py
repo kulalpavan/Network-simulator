@@ -64,6 +64,7 @@ class SelectiveRepeatProtocol:
         acknowledged = [False] * number_of_frames
         receiver_received = [False] * number_of_frames
         attempts = [0] * number_of_frames
+        receiver_base = 0
 
         events = []
 
@@ -127,14 +128,37 @@ class SelectiveRepeatProtocol:
                 # RECEIVER PROCESSING
                 # -------------------------------
 
+                ack_frames = []
+
                 if not receiver_received[frame]:
 
                     receiver_received[frame] = True
                     delivered_frames += 1
 
-                    events.append(
-                        f"Receiver: Frame {frame} received and buffered"
-                    )
+                    if frame == receiver_base:
+
+                        events.append(
+                            f"Receiver: Frame {frame} received successfully"
+                        )
+
+                        while (
+                            receiver_base < number_of_frames
+                            and receiver_received[receiver_base]
+                        ):
+                            ack_frames.append(receiver_base)
+
+                            events.append(
+                                f"Receiver: Frame {receiver_base} "
+                                "delivered to upper layer"
+                            )
+
+                            receiver_base += 1
+
+                    else:
+
+                        events.append(
+                            f"Receiver: Frame {frame} buffered (out-of-order)"
+                        )
 
                 else:
 
@@ -142,34 +166,38 @@ class SelectiveRepeatProtocol:
                         f"Receiver: Duplicate Frame {frame} discarded"
                     )
 
+                    ack_frames.append(frame)
+
                 # -------------------------------
                 # INDIVIDUAL ACK GENERATION
                 # -------------------------------
 
-                events.append(
-                    f"Receiver: Individual ACK {frame} generated"
-                )
-
-                total_time += ack_delay
-
-                # -------------------------------
-                # ACK LOSS
-                # -------------------------------
-
-                if rng.random() < ack_loss / 100:
+                for ack_frame in ack_frames:
 
                     events.append(
-                        f"Network: ACK {frame} LOST"
+                        f"Receiver: Individual ACK {ack_frame} generated"
                     )
 
-                else:
+                    total_time += ack_delay
 
-                    acknowledged[frame] = True
-                    acks_received += 1
+                    # ---------------------------
+                    # ACK LOSS
+                    # ---------------------------
 
-                    events.append(
-                        f"Sender: ACK {frame} received"
-                    )
+                    if rng.random() < ack_loss / 100:
+
+                        events.append(
+                            f"Network: ACK {ack_frame} LOST"
+                        )
+
+                    else:
+
+                        acknowledged[ack_frame] = True
+                        acks_received += 1
+
+                        events.append(
+                            f"Sender: ACK {ack_frame} received"
+                        )
 
             # -------------------------------
             # SLIDE SENDER WINDOW

@@ -74,7 +74,7 @@ def normalize_events(events, protocol, parameters):
             kind = "discard"
         elif "duplicate" in lower_event and "discard" in lower_event:
             kind = "duplicate"
-        elif "received and buffered" in lower_event:
+        elif "buffered" in lower_event:
             kind = "buffered"
         elif "received successfully" in lower_event or (
             "accepted" in lower_event and "frame" in lower_event
@@ -730,9 +730,8 @@ class AnimationPanel(ttk.Frame):
                 )
             if protocol == "Selective Repeat":
                 return (
-                    "The frame is buffered at the receiver. It can be "
-                    "acknowledged immediately even if earlier frames are "
-                    "still missing."
+                    "The frame matches the next expected sequence number, so "
+                    "the receiver delivers it and sends its ACK."
                 )
             return (
                 "The frame matches the expected sequence number, so the "
@@ -744,7 +743,8 @@ class AnimationPanel(ttk.Frame):
         if kind == "buffered":
             return (
                 "Selective Repeat keeps this out-of-order frame in its "
-                "buffer until the missing frame arrives."
+                "buffer without acknowledging it. When the missing frame "
+                "arrives, this frame is delivered and acknowledged then."
             )
         if kind == "duplicate":
             if protocol == "One-Bit Sliding Window":
